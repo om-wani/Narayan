@@ -57,3 +57,7 @@ Papers/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local tooling notes (not part of the repo)
+/CLAUDE.md
+docs/superpowers/
