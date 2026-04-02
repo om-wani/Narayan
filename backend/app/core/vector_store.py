@@ -1,3 +1,5 @@
+"""Singleton helpers for the embedding model and Chroma vector store."""
+
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from langchain_chroma import Chroma
@@ -5,7 +7,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 from app.core.config import settings
 
-# These are module-level variables — created once, reused forever
+# Module-level singletons keep the model and vector store loaded across requests.
 _embeddings = None
 _vector_store = None
 
@@ -13,9 +15,10 @@ client = chromadb.Client(ChromaSettings(anonymized_telemetry=False))
 
 def get_embeddings() -> HuggingFaceEmbeddings:
     """
-    Returns the local sentence-transformers embedding model.
-    First call downloads the model (~90MB) and loads it into memory.
-    Every call after that reuses the same loaded model instantly.
+    Return the shared sentence-transformers embedding model.
+
+    The first call downloads the model weights and loads them into memory;
+    subsequent calls reuse the same instance for the lifetime of the process.
     """
     global _embeddings
     if _embeddings is None:
@@ -31,6 +34,7 @@ def get_embeddings() -> HuggingFaceEmbeddings:
 
 
 def get_vector_store() -> Chroma:
+    """Return the shared persistent Chroma collection."""
     global _vector_store
     if _vector_store is None:
         client = chromadb.PersistentClient(
@@ -41,7 +45,7 @@ def get_vector_store() -> Chroma:
             client=client,
             collection_name=settings.COLLECTION_NAME,
             embedding_function=get_embeddings(),
-            collection_metadata={"hnsw:space": "cosine"},  # ← add this
+            collection_metadata={"hnsw:space": "cosine"},
         )
         print(f"Vector store ready at: {settings.VECTOR_STORE_PATH}")
     return _vector_store

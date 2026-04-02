@@ -1,3 +1,10 @@
+"""FastAPI application entrypoint for the backend.
+
+The app wires the document-ingestion and question-answering routers,
+configures CORS for the frontend, and preloads the vector store during
+startup so the first request does not pay model-loading latency.
+"""
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -9,10 +16,10 @@ from app.core.vector_store import get_vector_store
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load the vector store and embedding model at startup."""
-    print("Starting up — loading models...")
+    """Warm the embedding model and persistent vector store on startup."""
+    print("Starting up: loading embeddings and vector store...")
     get_vector_store()
-    print("Ready.")
+    print("Startup complete.")
     yield
 
 
@@ -45,4 +52,5 @@ app.include_router(
 
 @app.get("/health")
 async def health():
+    """Lightweight liveness check used by deploy and monitoring probes."""
     return {"status": "ok"}

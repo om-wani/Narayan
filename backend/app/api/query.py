@@ -1,3 +1,5 @@
+"""Question-answering API for the RAG pipeline."""
+
 from fastapi import APIRouter, HTTPException
 from app.services.rag import answer_question
 from app.models.schemas import QueryRequest, QueryResponse, SourceResult
@@ -7,7 +9,7 @@ router = APIRouter()
 
 @router.post("/", response_model=QueryResponse)
 async def query(req: QueryRequest):
-    """Answer a question using the RAG pipeline."""
+    """Run retrieval-augmented generation for a user question."""
     try:
         result = answer_question(
             question=req.question,

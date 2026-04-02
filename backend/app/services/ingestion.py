@@ -156,7 +156,7 @@ def list_documents() -> list[dict]:
     vs = get_vector_store()
     result = vs.get(include=["metadatas"])
 
-    # Group chunks by doc_id
+    # Aggregate chunk metadata back into a document-level summary.
     docs: dict[str, dict] = {}
     for meta in result["metadatas"]:
         doc_id = meta.get("doc_id", "unknown")

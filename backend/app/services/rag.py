@@ -70,7 +70,7 @@ def answer_question(
     top_k: int | None = None,
 ) -> dict:
     """
-    Full RAG pipeline. Returns a dict with answer, sources, and metadata.
+    Run the full RAG pipeline and return the answer, source list, and metadata.
 
     Args:
         question: The user's question
@@ -81,16 +81,15 @@ def answer_question(
     vs = get_vector_store()
     fetch_k = top_k or settings.TOP_K
 
-    # ── 1. Retrieve ────────────────────────────────────────────────
-    # Build an optional filter to scope search to specific documents
+    # Build an optional filter to scope search to specific documents.
     where_filter = None
     if doc_ids and len(doc_ids) == 1:
         where_filter = {"doc_id": doc_ids[0]}
     elif doc_ids and len(doc_ids) > 1:
         where_filter = {"$or": [{"doc_id": d} for d in doc_ids]}
 
-    # similarity_search_with_relevance_scores returns (Document, score) pairs
-    # Score is cosine similarity: 1.0 = identical, 0.0 = completely different
+    # similarity_search_with_relevance_scores returns (Document, score) pairs.
+    # The score is cosine similarity: 1.0 is identical, 0.0 is unrelated.
     results = vs.similarity_search_with_relevance_scores(
         question,
         k=fetch_k * 2,        # over-fetch so reranking has candidates to work with
@@ -105,10 +104,9 @@ def answer_question(
             "model": settings.LLM_MODEL,
         }
 
-    # ── 2. Rerank ──────────────────────────────────────────────────
     top_chunks = _rerank(results, settings.RERANK_TOP_K)
 
-    # ── 3. Format context ──────────────────────────────────────────
+    # Format context for the prompt in a source-first layout.
     sources_text = _format_sources(top_chunks)
     user_prompt = (
         f"Source excerpts from research papers:\n\n"
@@ -118,8 +116,7 @@ def answer_question(
         f"Answer (cite sources inline using [Source N] notation):"
     )
 
-    # ── 4. Generate ────────────────────────────────────────────────
-    # OpenRouter uses the OpenAI SDK format with a custom base_url
+    # OpenRouter uses the OpenAI SDK shape with a custom base_url.
     client = OpenAI(
         api_key=settings.OPENROUTER_API_KEY,
         base_url="http://localhost:11434/v1",
@@ -138,8 +135,7 @@ def answer_question(
     answer_text = response.choices[0].message.content
     tokens_used = response.usage.total_tokens if response.usage else 0
 
-    # ── 5. Build response ──────────────────────────────────────────
-    # Map chunks to clean source dicts for the API response
+    # Map chunks to clean source dicts for the API response.
     source_list = [
         {
             "filename": doc.metadata.get("filename", "unknown"),

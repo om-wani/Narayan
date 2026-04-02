@@ -1,3 +1,5 @@
+"""Pydantic request and response models for the backend API."""
+
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
@@ -6,6 +8,8 @@ from datetime import datetime
 # ── Document models ───────────────────────────────────────────────
 
 class DocumentMetadata(BaseModel):
+    """Document-level metadata returned after upload or during listing."""
+
     doc_id: str
     filename: str
     page_count: int
@@ -14,11 +18,15 @@ class DocumentMetadata(BaseModel):
 
 
 class DocumentListResponse(BaseModel):
+    """Container for document summaries and a total count."""
+
     documents: List[DocumentMetadata]
     total: int
 
 
 class DeleteResponse(BaseModel):
+    """Confirmation payload returned after deleting a document."""
+
     deleted: bool
     doc_id: str
 
@@ -26,6 +34,8 @@ class DeleteResponse(BaseModel):
 # ── Query models ──────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
+    """Input payload for a RAG question request."""
+
     question: str = Field(..., min_length=3, max_length=2000)
     doc_ids: Optional[List[str]] = Field(
         default=None,
@@ -35,6 +45,8 @@ class QueryRequest(BaseModel):
 
 
 class SourceResult(BaseModel):
+    """Single retrieved source excerpt included with an answer."""
+
     filename: str
     page: int
     doc_id: str
@@ -43,6 +55,8 @@ class SourceResult(BaseModel):
 
 
 class QueryResponse(BaseModel):
+    """Answer text plus the sources and metadata used to produce it."""
+
     answer: str
     sources: List[SourceResult]
     model: str
