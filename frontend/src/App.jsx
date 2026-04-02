@@ -1,428 +1,468 @@
-import { useState, useRef, useEffect } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import "./App.css"
 
 const API = "/api"
 
-async function uploadDoc(file) {
-  const fd = new FormData()
-  fd.append("file", file)
-  const r = await fetch(`${API}/documents/upload`, { method: "POST", body: fd })
-  if (!r.ok) throw new Error((await r.json()).detail || "Upload failed")
-  return r.json()
+function makeId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID()
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-async function fetchDocs() {
-  const r = await fetch(`${API}/documents/`)
-  return (await r.json()).documents
+function shortId(id) {
+  return id ? `${id.slice(0, 8)}…` : ""
 }
 
-async function deleteDoc(id) {
-  await fetch(`${API}/documents/${id}`, { method: "DELETE" })
+function formatCost(cost) {
+  if (typeof cost !== "number") return "0.0000"
+  return cost.toFixed(4)
 }
 
-async function askQuestion(question, docIds) {
-  const r = await fetch(`${API}/query/`, {
+async function readErrorMessage(response) {
+  const text = await response.text()
+  if (!text) return `Request failed (${response.status})`
+  try {
+    const parsed = JSON.parse(text)
+    return parsed.detail || parsed.message || text
+  } catch {
+    return text
+  }
+}
+
+async function uploadDocument(file) {
+  const formData = new FormData()
+  formData.append("file", file)
+  const response = await fetch(`${API}/ingest/upload`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      question,
-      doc_ids: docIds?.length ? docIds : null,
-    }),
+    body: formData,
   })
-  if (!r.ok) throw new Error((await r.json()).detail || "Query failed")
-  return r.json()
+  if (!response.ok) throw new Error(await readErrorMessage(response))
+  return response.json()
 }
 
-function SourceCard({ src, index }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div style={{
-      border: "1px solid #e2e8f0", borderRadius: 8,
-      overflow: "hidden", fontSize: 13, marginBottom: 6,
-    }}>
-      <div
-        onClick={() => setOpen(v => !v)}
-        style={{
-          display: "flex", alignItems: "center", gap: 10,
-          padding: "8px 12px", background: "#f8fafc",
-          cursor: "pointer", userSelect: "none",
-        }}
-      >
-        <span style={{
-          background: "#dbeafe", color: "#1e40af",
-          borderRadius: 4, padding: "1px 7px",
-          fontFamily: "monospace", fontSize: 12, fontWeight: 600,
-        }}>
-          [{index}]
-        </span>
-        <span style={{ flex: 1, color: "#374151", fontWeight: 500 }}>
-          {src.filename}
-        </span>
-        <span style={{ color: "#9ca3af" }}>Page {src.page}</span>
-        <span style={{
-          background: "#dcfce7", color: "#166534",
-          borderRadius: 4, padding: "1px 6px", fontSize: 11,
-        }}>
-          {Math.round(src.score * 100)}% match
-        </span>
-        <span style={{ color: "#9ca3af" }}>{open ? "▲" : "▼"}</span>
-      </div>
-      {open && (
-        <div style={{
-          padding: "10px 14px", background: "#fff",
-          color: "#6b7280", lineHeight: 1.6,
-          borderTop: "1px solid #e2e8f0",
-        }}>
-          {src.text}
-        </div>
-      )}
-    </div>
-  )
+async function fetchDocuments() {
+  const response = await fetch(`${API}/ingest/`)
+  if (!response.ok) throw new Error(await readErrorMessage(response))
+  const data = await response.json()
+  return data.documents || []
 }
 
-function Answer({ data }) {
-  if (!data) return null
-  const parts = data.answer.split(/(\[Source \d+\])/g)
-  return (
-    <div style={{ marginTop: 24 }}>
-      <div style={{
-        background: "#f0fdf4", border: "1px solid #bbf7d0",
-        borderRadius: 12, padding: "18px 20px",
-        lineHeight: 1.8, color: "#111827", fontSize: 14,
-      }}>
-        {parts.map((part, i) =>
-          /\[Source \d+\]/.test(part)
-            ? <span key={i} style={{
-                color: "#1d4ed8", fontFamily: "monospace",
-                fontSize: 12, background: "#dbeafe",
-                borderRadius: 3, padding: "1px 5px",
-              }}>{part}</span>
-            : <span key={i}>{part}</span>
-        )}
-        <div style={{
-          marginTop: 12, paddingTop: 10,
-          borderTop: "1px solid #dcfce7",
-          fontSize: 12, color: "#6b7280",
-          display: "flex", gap: 16,
-        }}>
-          <span>model: {data.model}</span>
-          {data.tokens_used > 0 && <span>tokens: {data.tokens_used}</span>}
-        </div>
-      </div>
+async function deleteDocument(docId) {
+  const response = await fetch(`${API}/ingest/${encodeURIComponent(docId)}`, {
+    method: "DELETE",
+  })
+  if (!response.ok) throw new Error(await readErrorMessage(response))
+}
 
-      {data.sources.length > 0 && (
-        <div style={{ marginTop: 14 }}>
-          <div style={{
-            fontSize: 11, color: "#9ca3af",
-            marginBottom: 8, letterSpacing: "0.06em",
-            fontWeight: 600,
-          }}>
-            SOURCES ({data.sources.length}) — click to expand
+async function* readSse(responseBody) {
+  if (!responseBody) throw new Error("Stream body missing")
+  const reader = responseBody.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (value) buffer += decoder.decode(value, { stream: !done })
+
+    let separatorIndex = buffer.indexOf("\n\n")
+    while (separatorIndex !== -1) {
+      const rawEvent = buffer.slice(0, separatorIndex).trim()
+      buffer = buffer.slice(separatorIndex + 2)
+      if (rawEvent) yield parseSseEvent(rawEvent)
+      separatorIndex = buffer.indexOf("\n\n")
+    }
+
+    if (done) break
+  }
+
+  const tail = buffer.trim()
+  if (tail) yield parseSseEvent(tail)
+}
+
+function parseSseEvent(rawEvent) {
+  const lines = rawEvent.split(/\r?\n/)
+  let event = "message"
+  const dataLines = []
+
+  for (const line of lines) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim()
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart())
+    }
+  }
+
+  return { event, data: dataLines.join("\n") }
+}
+
+function MessageBubble({ message }) {
+  const isUser = message.role === "user"
+  return (
+    <article className={`message ${isUser ? "user" : "assistant"}`}>
+      <div className="message-head">
+        <span className="message-role">{isUser ? "You" : "Narayan"}</span>
+        {message.pending ? <span className="message-pulse">streaming</span> : null}
+      </div>
+      <div className="message-body">
+        {message.content || (message.pending ? " " : "No response")}
+      </div>
+      {message.role === "assistant" && message.stats ? (
+        <div className="message-stats">
+          <span>{message.stats.model || "model"}</span>
+          <span>{message.stats.totalTokens || 0} tokens</span>
+          <span>${formatCost(message.stats.estimatedCostUsd || 0)} est.</span>
+          <span>{message.stats.latencyMs || 0} ms</span>
+        </div>
+      ) : null}
+      {message.role === "assistant" && message.sources?.length ? (
+        <div className="sources">
+          <div className="section-label">Sources</div>
+          <div className="source-grid">
+            {message.sources.map((source) => (
+              <details key={source.source_id} className="source-card">
+                <summary>
+                  <span>{source.filename || "Document"}</span>
+                  <span>Page {source.page || 0}</span>
+                  <span>{Math.round((source.score || 0) * 100)}%</span>
+                </summary>
+                <p>{source.text}</p>
+              </details>
+            ))}
           </div>
-          {data.sources.map((s, i) => (
-            <SourceCard key={i} src={s} index={i + 1} />
-          ))}
         </div>
-      )}
-    </div>
+      ) : null}
+    </article>
   )
 }
 
 export default function App() {
-  const [docs, setDocs] = useState([])
-  const [selectedDocs, setSelectedDocs] = useState([])
+  const [documents, setDocuments] = useState([])
+  const [selectedDocIds, setSelectedDocIds] = useState([])
+  const [messages, setMessages] = useState([
+    {
+      id: "welcome",
+      role: "assistant",
+      content:
+        "Drop PDFs, pick docs, then ask a question. Answers stream in real time with citations.",
+    },
+  ])
   const [question, setQuestion] = useState("")
-  const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
-  const [error, setError] = useState(null)
-  const fileRef = useRef()
+  const [error, setError] = useState("")
+  const [sessionId] = useState(() => makeId())
+  const fileInputRef = useRef(null)
+  const endRef = useRef(null)
 
-  useEffect(() => { fetchDocs().then(setDocs).catch(() => {}) }, [])
+  const selectedDocsLabel = useMemo(() => {
+    if (!selectedDocIds.length) return "All docs"
+    if (selectedDocIds.length === 1) return "1 selected doc"
+    return `${selectedDocIds.length} selected docs`
+  }, [selectedDocIds.length])
 
-  const toggleDoc = (id) =>
-    setSelectedDocs(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id])
+  useEffect(() => {
+    refreshDocuments().catch((err) => setError(err.message))
+  }, [])
 
-  const handleUpload = async (files) => {
-    setUploading(true)
-    setError(null)
-    for (const f of files) {
-      try {
-        await uploadDoc(f)
-      } catch (e) {
-        setError(e.message)
-      }
-    }
-    setDocs(await fetchDocs())
-    setUploading(false)
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
+  }, [messages, loading])
+
+  async function refreshDocuments() {
+    const next = await fetchDocuments()
+    setDocuments(next)
   }
 
-  const handleAsk = async () => {
-    if (!question.trim() || loading) return
-    setLoading(true)
-    setError(null)
-    setResult(null)
+  function toggleDoc(docId) {
+    setSelectedDocIds((current) =>
+      current.includes(docId)
+        ? current.filter((item) => item !== docId)
+        : [...current, docId],
+    )
+  }
+
+  async function handleUpload(event) {
+    const files = Array.from(event.target.files || []).filter((file) =>
+      file.name.toLowerCase().endsWith(".pdf"),
+    )
+    event.target.value = ""
+    if (!files.length) return
+
+    setUploading(true)
+    setError("")
     try {
-      const r = await askQuestion(question, selectedDocs)
-      setResult(r)
-    } catch (e) {
-      setError(e.message)
+      for (const file of files) {
+        await uploadDocument(file)
+      }
+      await refreshDocuments()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setUploading(false)
     }
-    setLoading(false)
+  }
+
+  async function handleDelete(docId) {
+    setError("")
+    try {
+      await deleteDocument(docId)
+      setSelectedDocIds((current) => current.filter((item) => item !== docId))
+      await refreshDocuments()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    const text = question.trim()
+    if (!text || loading) return
+
+    const userMessage = { id: makeId(), role: "user", content: text }
+    const assistantId = makeId()
+    setQuestion("")
+    setError("")
+    setLoading(true)
+    const startedAt = performance.now()
+    setMessages((current) => [
+      ...current,
+      userMessage,
+      { id: assistantId, role: "assistant", content: "", pending: true },
+    ])
+
+    try {
+      const response = await fetch(`${API}/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: text,
+          session_id: sessionId,
+          doc_ids: selectedDocIds.length ? selectedDocIds : null,
+        }),
+      })
+
+      if (!response.ok) throw new Error(await readErrorMessage(response))
+
+      let streamedAnswer = ""
+      for await (const event of readSse(response.body)) {
+        if (event.event === "error") {
+          const payload = JSON.parse(event.data)
+          throw new Error(payload.message || "Stream failed")
+        }
+
+        const payload = JSON.parse(event.data)
+        if (payload.type === "delta") {
+          streamedAnswer += payload.text || ""
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantId
+                ? { ...message, content: streamedAnswer }
+                : message,
+            ),
+          )
+        }
+
+        if (payload.type === "done") {
+          streamedAnswer = payload.answer || streamedAnswer
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantId
+                ? {
+                    ...message,
+                    content: streamedAnswer,
+                    pending: false,
+                    sources: payload.sources || [],
+                    stats: {
+                      model: payload.model,
+                      promptTokens: payload.prompt_tokens,
+                      completionTokens: payload.completion_tokens,
+                      totalTokens: payload.total_tokens,
+                      estimatedCostUsd: payload.estimated_cost_usd,
+                      latencyMs: Math.round(performance.now() - startedAt),
+                    },
+                  }
+                : message,
+            ),
+          )
+        }
+      }
+    } catch (err) {
+      setError(err.message)
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                content: `Error: ${err.message}`,
+                pending: false,
+              }
+            : message,
+        ),
+      )
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
-    <div style={{
-      minHeight: "100vh", background: "#f9fafb",
-      fontFamily: "system-ui, sans-serif",
-    }}>
-      {/* Header */}
-      <div style={{
-        background: "#fff", borderBottom: "1px solid #e5e7eb",
-        padding: "14px 32px", display: "flex",
-        alignItems: "center", gap: 12,
-      }}>
-      <div style={{
-        width: 32, height: 32, borderRadius: 8,
-        background: "#1d4ed8", display: "flex",
-        alignItems: "center", justifyContent: "center",
-        color: "#fff", fontWeight: 700, fontSize: 16,
-      }}>R</div>
-      <div>
-        <div style={{ fontWeight: 600, fontSize: 15 }}>
-          Medical Research RAG
-        </div>
-        <div style={{ fontSize: 12, color: "#6b7280" }}>
-          Ask questions about your papers, get cited answers
-        </div>
-      </div>
-      <div style={{ flex: 1 }} />
-        <div style={{ fontSize: 13, color: "#9ca3af" }}>
-          {docs.length} paper{docs.length !== 1 ? "s" : ""} indexed
-        </div>
-      </div>
-
-      <div style={{ display: "flex", height: "calc(100vh - 65px)" }}>
-        {/* Sidebar */}
-        <div style={{
-          width: 280, background: "#fff",
-          borderRight: "1px solid #e5e7eb",
-          padding: 16, display: "flex",
-          flexDirection: "column", gap: 10,
-          overflowY: "auto",
-        }}>
-          <div
-            onClick={() => fileRef.current.click()}
-            onDrop={e => {
-              e.preventDefault()
-              const files = [...e.dataTransfer.files].filter(f => f.name.endsWith(".pdf"))
-              if (files.length) handleUpload(files)
-            }}
-            onDragOver={e => e.preventDefault()}
-            style={{
-              border: "2px dashed #e2e8f0", borderRadius: 10,
-              padding: "20px 12px", textAlign: "center",
-              cursor: "pointer", color: "#9ca3af", fontSize: 13,
-              transition: "border-color .15s, color .15s",
-            }}
-            onMouseEnter={e => {
-              e.currentTarget.style.borderColor = "#1d4ed8"
-              e.currentTarget.style.color = "#1d4ed8"
-            }}
-            onMouseLeave={e => {
-              e.currentTarget.style.borderColor = "#e2e8f0"
-              e.currentTarget.style.color = "#9ca3af"
-            }}
-          >
-            {uploading ? (
-              <span style={{ color: "#1d4ed8" }}>Indexing…</span>
-            ) : (
-              <>
-                <div style={{ fontSize: 24, marginBottom: 4 }}>+</div>
-                <div style={{ fontWeight: 500 }}>Upload PDF</div>
-                <div style={{ fontSize: 11, marginTop: 2 }}>
-                  or drag and drop
-                </div>
-              </>
-            )}
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-mark">N</div>
+          <div>
+            <div className="brand-title">Narayan Azure RAG</div>
+            <div className="brand-subtitle">
+              SSE chat, vector search, citations, memory, cost tracking
+            </div>
           </div>
-          <input
-            ref={fileRef} type="file" accept=".pdf"
-            multiple style={{ display: "none" }}
-            onChange={e => handleUpload([...e.target.files])}
-          />
+        </div>
+        <div className="topbar-meta">
+          <span className="pill">{documents.length} docs</span>
+          <span className="pill">{selectedDocsLabel}</span>
+          <span className="pill">session {shortId(sessionId)}</span>
+        </div>
+      </header>
 
-          {docs.length > 0 && (
-            <>
-              <div style={{
-                fontSize: 10, color: "#9ca3af",
-                letterSpacing: "0.08em", fontWeight: 600,
-                marginTop: 6,
-              }}>
-                PAPERS — click to filter
+      <main className="layout">
+        <aside className="sidebar">
+          <section className="card accent">
+            <div className="card-head">
+              <div>
+                <h2>Corpus</h2>
+                <p>Upload PDFs, pick scope, or search across whole collection.</p>
               </div>
-              {docs.map(doc => (
-                <div
-                  key={doc.doc_id}
-                  onClick={() => toggleDoc(doc.doc_id)}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 8,
-                    padding: "8px 10px", borderRadius: 8, cursor: "pointer",
-                    border: `1px solid ${selectedDocs.includes(doc.doc_id) ? "#1d4ed8" : "#e5e7eb"}`,
-                    background: selectedDocs.includes(doc.doc_id) ? "#eff6ff" : "#fff",
-                    fontSize: 13, transition: "all .12s",
-                  }}
-                >
-                  <span style={{
-                    color: selectedDocs.includes(doc.doc_id) ? "#1d4ed8" : "#d1d5db",
-                    fontSize: 10,
-                  }}>
-                    {selectedDocs.includes(doc.doc_id) ? "●" : "○"}
-                  </span>
-                  <span style={{
-                    flex: 1, overflow: "hidden",
-                    textOverflow: "ellipsis", whiteSpace: "nowrap",
-                    color: "#374151",
-                  }}>
-                    {doc.filename}
-                  </span>
-                  <span style={{ fontSize: 11, color: "#9ca3af" }}>
-                    {doc.chunk_count}c
-                  </span>
-                  <button
-                    onClick={e => {
-                      e.stopPropagation()
-                      deleteDoc(doc.doc_id).then(() =>
-                        setDocs(d => d.filter(x => x.doc_id !== doc.doc_id))
-                      )
-                      setSelectedDocs(s => s.filter(x => x !== doc.doc_id))
-                    }}
-                    style={{
-                      background: "none", border: "none",
-                      color: "#d1d5db", cursor: "pointer",
-                      fontSize: 16, lineHeight: 1, padding: "0 2px",
-                    }}
-                    title="Remove"
-                  >×</button>
+              <button
+                className="ghost-btn"
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+              >
+                {uploading ? "Uploading…" : "Upload"}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,application/pdf"
+                multiple
+                hidden
+                onChange={handleUpload}
+              />
+            </div>
+            <div className="note">
+              Azure AI Search + Azure OpenAI paths live in <code>backend_azure</code>.
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="section-head">
+              <h3>Documents</h3>
+              <button
+                type="button"
+                className="text-btn"
+                onClick={() => refreshDocuments().catch((err) => setError(err.message))}
+              >
+                Refresh
+              </button>
+            </div>
+
+            <div className="doc-list">
+              {documents.length === 0 ? (
+                <div className="empty-state">
+                  No docs yet. Upload PDF to start.
                 </div>
-              ))}
-              {selectedDocs.length > 0 && (
-                <button
-                  onClick={() => setSelectedDocs([])}
-                  style={{
-                    background: "none", border: "none",
-                    color: "#6b7280", cursor: "pointer",
-                    fontSize: 12, textAlign: "left", padding: 0,
-                  }}
-                >
-                  clear filter ({selectedDocs.length} selected)
-                </button>
+              ) : (
+                documents.map((doc) => (
+                  <div key={doc.doc_id} className="doc-row">
+                    <label className="doc-label">
+                      <input
+                        type="checkbox"
+                        checked={selectedDocIds.includes(doc.doc_id)}
+                        onChange={() => toggleDoc(doc.doc_id)}
+                      />
+                      <span>
+                        <strong>{doc.filename}</strong>
+                        <small>
+                          {doc.page_count || 0} pages · {doc.chunk_count || 0} chunks
+                        </small>
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      className="danger-btn"
+                      onClick={() => handleDelete(doc.doc_id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))
               )}
-            </>
-          )}
-        </div>
+            </div>
+          </section>
 
-        {/* Main */}
-        <div style={{
-          flex: 1, padding: "28px 40px",
-          overflowY: "auto", maxWidth: "calc(100vw - 280px)",
-        }}>
-          {/* Input */}
-          <div style={{ position: "relative" }}>
-            <textarea
-              value={question}
-              onChange={e => setQuestion(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault()
-                  handleAsk()
-                }
-              }}
-              placeholder={
-                docs.length === 0
-                  ? "Upload a PDF to get started…"
-                  : "Ask a question about your papers… (Enter to send)"
-              }
-              disabled={docs.length === 0 || loading}
-              rows={3}
-              style={{
-                width: "100%", padding: "14px 56px 14px 16px",
-                border: "1px solid #e2e8f0", borderRadius: 12,
-                fontSize: 14, fontFamily: "inherit", resize: "none",
-                outline: "none", background: "#fff",
-                boxSizing: "border-box", lineHeight: 1.6,
-                color: "#111827",
-              }}
-            />
-            <button
-              onClick={handleAsk}
-              disabled={!question.trim() || loading || docs.length === 0}
-              style={{
-                position: "absolute", right: 10, bottom: 10,
-                background: loading ? "#e5e7eb" : "#1d4ed8",
-                border: "none", borderRadius: 8,
-                padding: "7px 16px", color: "#fff",
-                cursor: loading ? "default" : "pointer",
-                fontSize: 13, fontWeight: 500,
-                transition: "background .15s",
-              }}
-            >
-              {loading ? "thinking…" : "Ask"}
-            </button>
+          <section className="card">
+            <h3>Azure checklist</h3>
+            <ul className="checklist">
+              <li>Azure student subscription</li>
+              <li>Foundry project</li>
+              <li>Chat deployment</li>
+              <li>Embedding deployment</li>
+              <li>AI Search index</li>
+              <li>Budget alert</li>
+            </ul>
+          </section>
+        </aside>
+
+        <section className="chat-panel">
+          <div className="chat-card">
+            <div className="section-head chat-head">
+              <div>
+                <h3>Chat</h3>
+                <p>Ask about uploaded docs. SSE stream updates live.</p>
+              </div>
+              <div className="status-row">
+                <span className={`status ${loading ? "live" : "idle"}`}>
+                  {loading ? "streaming" : "ready"}
+                </span>
+              </div>
+            </div>
+
+            {error ? <div className="error-banner">{error}</div> : null}
+
+            <div className="messages">
+              {messages.map((message) => (
+                <MessageBubble key={message.id} message={message} />
+              ))}
+              <div ref={endRef} />
+            </div>
+
+            <form className="composer" onSubmit={handleSubmit}>
+              <label className="composer-label" htmlFor="question">
+                Question
+              </label>
+              <textarea
+                id="question"
+                value={question}
+                placeholder="Ask a question about the uploaded papers..."
+                rows={4}
+                onChange={(event) => setQuestion(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault()
+                    handleSubmit(event)
+                  }
+                }}
+              />
+              <div className="composer-footer">
+                <div className="composer-hint">
+                  Press <kbd>Enter</kbd> to send, <kbd>Shift</kbd> + <kbd>Enter</kbd> for newline.
+                </div>
+                <button type="submit" className="send-btn" disabled={loading}>
+                  {loading ? "Working…" : "Send"}
+                </button>
+              </div>
+            </form>
           </div>
-
-          {selectedDocs.length > 0 && (
-            <div style={{ marginTop: 8, fontSize: 12, color: "#1d4ed8" }}>
-              Searching {selectedDocs.length} selected paper{selectedDocs.length !== 1 ? "s" : ""}
-            </div>
-          )}
-
-          {error && (
-            <div style={{
-              marginTop: 14, padding: "10px 14px",
-              background: "#fef2f2", border: "1px solid #fecaca",
-              borderRadius: 8, color: "#dc2626", fontSize: 13,
-            }}>
-              {error}
-            </div>
-          )}
-
-          {loading && (
-            <div style={{
-              marginTop: 32, color: "#9ca3af",
-              fontSize: 13, textAlign: "center",
-            }}>
-              Retrieving chunks · generating answer…
-            </div>
-          )}
-
-          <Answer data={result} />
-
-          {docs.length === 0 && (
-            <div style={{
-              marginTop: 80, textAlign: "center",
-              color: "#d1d5db", lineHeight: 2,
-            }}>
-              <div style={{ fontSize: 40, marginBottom: 8 }}>📄</div>
-              <div style={{ fontSize: 15, fontWeight: 500 }}>
-                Upload a research paper to get started
-              </div>
-              <div style={{ fontSize: 13 }}>
-                Supports any medical PDF from PubMed Central
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <style>{`
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { margin: 0; }
-        textarea::placeholder { color: #9ca3af; }
-        ::-webkit-scrollbar { width: 4px; }
-        ::-webkit-scrollbar-thumb {
-          background: #e2e8f0; border-radius: 2px;
-        }
-      `}</style>
+        </section>
+      </main>
     </div>
   )
 }
